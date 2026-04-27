@@ -43,8 +43,8 @@ def load_universe_tickers(
             "PEGY_TICKERS is set (comma-separated)."
         )
 
-    endpoint = "sp500_constituent"
-    url = "https://financialmodelingprep.com/api/v3/sp500_constituent"
+    endpoint = "sp500-constituent"
+    url = "https://financialmodelingprep.com/stable/sp500-constituent"
     params = {"apikey": fmp_api_key}
     key = cache_key("fmp", endpoint, {"endpoint": endpoint})
     cached = cache.read_json(key)
@@ -63,7 +63,7 @@ def load_universe_tickers(
             endpoint=url,
             cache_key_str=key,
             status="ok",
-            notes="sp500_constituent",
+            notes="sp500-constituent",
         )
     symbols = [row["symbol"] for row in cached if row.get("symbol")]
     return sorted(set(symbols))

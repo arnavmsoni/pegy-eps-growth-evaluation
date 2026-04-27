@@ -23,7 +23,7 @@ def _safe_float(x: Any) -> Optional[float]:
 
 
 class FMPClient:
-    base = "https://financialmodelingprep.com/api/v3"
+    base = "https://financialmodelingprep.com/stable"
 
     def __init__(
         self,
@@ -38,11 +38,17 @@ class FMPClient:
         self.session = session or requests.Session()
         self.limiter = RateLimiter(cfg.min_interval_fmp)
 
-    def _get_json(self, path: str, extra_params: dict[str, Any] | None = None) -> tuple[Any, str]:
+    def _get_json(
+        self,
+        path: str,
+        extra_params: dict[str, Any] | None = None,
+        *,
+        cache_path: str | None = None,
+    ) -> tuple[Any, str]:
         self.limiter.wait("fmp")
         params = {"apikey": self.api_key, **(extra_params or {})}
         url = f"{self.base}{path}"
-        key = cache_key("fmp", path, params)
+        key = cache_key("fmp", cache_path or path, params)
         cached = self.cache.read_json(key)
         if cached is not None:
             return cached, key
@@ -56,7 +62,7 @@ class FMPClient:
             endpoint=url,
             cache_key_str=key,
             status="ok",
-            notes=path,
+            notes=cache_path or path,
         )
         return data, key
 
@@ -72,16 +78,18 @@ class FMPClient:
             "eps_ttm_proxy": None,
         }
 
-        ratios, k1 = self._get_json(f"/ratios-ttm/{t}")
+        ratios, k1 = self._get_json("/ratios-ttm", {"symbol": t}, cache_path=f"/ratios-ttm/{t}")
         prov.append(Provenance("fmp", "ratios-ttm", datetime.now(timezone.utc).isoformat(), k1))
         if isinstance(ratios, list) and ratios:
             r0 = ratios[0]
-            out["pe_ttm"] = _safe_float(r0.get("priceEarningsRatioTTM"))
+            out["pe_ttm"] = _safe_float(
+                r0.get("priceEarningsRatioTTM") or r0.get("priceToEarningsRatioTTM")
+            )
             dy = _safe_float(r0.get("dividendYieldTTM"))
             if dy is not None:
                 out["dividend_yield_ttm"] = dy if dy <= 1.0 else dy / 100.0
 
-        km, k2 = self._get_json(f"/key-metrics-ttm/{t}")
+        km, k2 = self._get_json("/key-metrics-ttm", {"symbol": t}, cache_path=f"/key-metrics-ttm/{t}")
         prov.append(Provenance("fmp", "key-metrics-ttm", datetime.now(timezone.utc).isoformat(), k2))
         if isinstance(km, list) and km:
             m0 = km[0]
@@ -91,15 +99,19 @@ class FMPClient:
             if eps is not None:
                 out["eps_ttm_proxy"] = eps
 
-        est, k3 = self._get_json(f"/analyst-estimates/{t}", {"period": "annual"})
+        est, k3 = self._get_json(
+            "/analyst-estimates",
+            {"symbol": t, "period": "annual"},
+            cache_path=f"/analyst-estimates/{t}",
+        )
         prov.append(Provenance("fmp", "analyst-estimates", datetime.now(timezone.utc).isoformat(), k3))
         if isinstance(est, list) and len(est) >= 2:
             est_sorted: List[dict] = sorted(
                 [e for e in est if e.get("date")],
                 key=lambda e: str(e.get("date")),
             )
-            fy0 = _safe_float(est_sorted[0].get("estimatedEpsAvg"))
-            fy1 = _safe_float(est_sorted[1].get("estimatedEpsAvg"))
+            fy0 = _safe_float(est_sorted[0].get("estimatedEpsAvg") or est_sorted[0].get("epsAvg"))
+            fy1 = _safe_float(est_sorted[1].get("estimatedEpsAvg") or est_sorted[1].get("epsAvg"))
             if fy0 and fy1 and abs(fy0) > 1e-9:
                 out["eps_growth_forecast"] = (fy1 - fy0) / abs(fy0)
 
@@ -108,7 +120,13 @@ class FMPClient:
     def fetch_historical_prices(self, ticker: str, from_date: str, to_date: str) -> list[dict]:
         """Daily adjusted close from FMP historical-price-full."""
         t = ticker.upper()
-        data, _ = self._get_json(f"/historical-price-full/{t}", {"from": from_date, "to": to_date})
+        data, _ = self._get_json(
+            "/historical-price-eod/full",
+            {"symbol": t, "from": from_date, "to": to_date},
+            cache_path=f"/historical-price-full/{t}",
+        )
+        if isinstance(data, list):
+            return data
         if not isinstance(data, dict):
             return []
         hist = data.get("historical") or []
@@ -120,7 +138,12 @@ class FMPClient:
         Uses two most recent reported annual EPS values in the payload.
         """
         t = ticker.upper()
-        inc, _ = self._get_json(f"/income-statement/{t}", {"period": "annual", "limit": limit})
+        free_plan_limit = min(limit, 5)
+        inc, _ = self._get_json(
+            "/income-statement",
+            {"symbol": t, "period": "annual", "limit": free_plan_limit},
+            cache_path=f"/income-statement/{t}",
+        )
         if not isinstance(inc, list) or len(inc) < 2:
             return None
         sorted_inc = sorted(inc, key=lambda r: str(r.get("date") or r.get("fillingDate") or ""))
@@ -131,7 +154,16 @@ class FMPClient:
         return (e1 - e0) / abs(e0)
 
     def fetch_ratios_quarterly(self, ticker: str, limit: int = 80) -> list[dict]:
-        """Quarterly ratios for time-varying P/E and dividend yield (point-in-time proxy)."""
+        """Ratios for time-varying P/E and dividend yield (point-in-time proxy).
+
+        FMP's stable quarterly ratio endpoint is plan-gated for this account, so
+        this uses annual ratios as the available historical valuation proxy.
+        """
         t = ticker.upper()
-        data, _ = self._get_json(f"/ratios/{t}", {"period": "quarter", "limit": limit})
+        free_plan_limit = min(limit, 5)
+        data, _ = self._get_json(
+            "/ratios",
+            {"symbol": t, "limit": free_plan_limit},
+            cache_path=f"/ratios/{t}",
+        )
         return data if isinstance(data, list) else []
