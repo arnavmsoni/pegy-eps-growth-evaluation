@@ -1,0 +1,22 @@
+# One ticker per line. For use when FMP /sp500_constituent returns 403 on your plan.
+# Not the full index — only a liquid subset for pipeline testing.
+AAPL
+MSFT
+GOOGL
+AMZN
+NVDA
+META
+JPM
+V
+UNH
+JNJ
+XOM
+PG
+MA
+HD
+CVX
+MRK
+ABBV
+PEP
+COST
+AVGO
